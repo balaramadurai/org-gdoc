@@ -1,0 +1,59 @@
+#+TITLE: org-gdoc
+#+AUTHOR: Bala Ramadurai <bala@balaramadurai.net>
+
+* Overview
+
+A package to convert locally synced Google Docs (=.gddoc= files) from Insync to Org-mode files in Emacs.
+
+* Installation
+
+** Steps
+
+1. [[Clone the Repository][Clone the Repository]]:
+   #+BEGIN_SRC sh
+   git clone https://github.com/balaramadurai/org-gdoc.git ~/.emacs.d/lisp/org-gdoc
+   #+END_SRC
+
+2. [[Add to Emacs Load Path][Add to Emacs Load Path]]:
+   Add the following to your Emacs configuration file (e.g., =~/.emacs.d/init.el=):
+   #+BEGIN_SRC emacs-lisp
+   (add-to-list 'load-path "~/.emacs.d/lisp/org-gdoc")
+   (require 'org-gdoc)
+   #+END_SRC
+
+3. [[Configure Paths][Configure Paths]]:
+   Customize the following variables:
+   - =org-gdoc-python-script-path=: Path to =gdoc_to_org.py= (default: =~/gdoc_to_org.py=).
+   - =org-gdoc-credentials-path=: Path to your Google API credentials JSON file (default: =~/Documents/3Resources/emacs/pure-emacs/gdoc-api-credentials.json=).
+   Example:
+   #+BEGIN_SRC emacs-lisp
+   (setq org-gdoc-python-script-path "~/gdoc_to_org.py")
+   (setq org-gdoc-credentials-path "~/my-credentials.json")
+   #+END_SRC
+
+4. [[Install Dependencies][Install Dependencies]]:
+   - Ensure Python 3 and the =google-auth-oauthlib= library are installed:
+     #+BEGIN_SRC sh
+     pip3 install google-auth-oauthlib
+     #+END_SRC
+   - Set up Google API credentials (follow Google’s OAuth guide and place the JSON file at the specified path).
+
+5. [[Byte Compile (Optional)][Byte Compile (Optional)]]:
+   #+BEGIN_SRC sh
+   emacs -batch -f batch-byte-compile ~/.emacs.d/lisp/org-gdoc/org-gdoc.el
+   #+END_SRC
+
+* Usage
+
+1. Run =M-x org-gdoc-download=.
+2. Specify the output Org-mode file path (e.g., =~/test.org=).
+3. Navigate to your Insync directory (e.g., =~/Insync/bala@balaramadurai.net/=) and select a =.gddoc= file.
+4. Check the =*Messages*= buffer for the conversion result.
+
+* License
+
+This project is licensed under the MIT License - see the [[./LICENSE][LICENSE]] file for details.
+
+* Author
+
+Bala Ramadurai <bala@balaramadurai.net>

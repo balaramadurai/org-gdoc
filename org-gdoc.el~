@@ -1,0 +1,72 @@
+;;; org-gdoc.el --- Convert local .gddoc files to Org-mode  -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2025 Bala Ramadurai <bala@balaramadurai.net>
+
+;; Author: Bala Ramadurai <bala@balaramadurai.net>
+;; Version: 0.1
+;; Package-Requires: ((emacs "24.4"))
+;; Keywords: org-mode, google-docs, conversion
+;; URL: https://github.com/balaramadurai/org-gdoc
+;; License: MIT
+
+;; This file is not part of GNU Emacs.
+
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the MIT License. See the LICENSE file for
+;; details.
+
+;;; Commentary:
+;; This package allows conversion of locally synced Google Docs (.gddoc files)
+;; from Insync to Org-mode files in Emacs. It uses a Python script to interact
+;; with the Google Docs API.
+
+;;; Code:
+
+(defcustom org-gdoc-python-script-path "~/gdoc_to_org.py"
+  "Path to the Python script for converting Google Docs."
+  :type 'string
+  :group 'org-gdoc)
+
+(defcustom org-gdoc-credentials-path "/path/to/credentials.json"
+  "Path to the Google API credentials JSON file."
+  :type 'string
+  :group 'org-gdoc)
+
+(defun org-gdoc-extract-id (gddoc-file)
+  "Extract the Google Doc ID from a .gddoc file."
+  (with-temp-buffer
+    (insert-file-contents gddoc-file)
+    (let ((json-object-type 'hash-table)
+          (json-array-type 'list)
+          (json-key-type 'string))
+      (let ((json-data (json-read)))
+        (gethash "file_id" json-data)))))
+
+(defun org-gdoc-convert (output-file gddoc-file)
+  "Convert the Google Doc from GDDOC-FILE to an Org-mode file at OUTPUT-FILE."
+  (let* ((python-bin (executable-find "python3"))
+         (doc-id (org-gdoc-extract-id gddoc-file))
+         (convert-command (format "%s %s %s %s"
+                                  python-bin
+                                  (shell-quote-argument (expand-file-name org-gdoc-python-script-path))
+                                  (shell-quote-argument doc-id)
+                                  (shell-quote-argument (expand-file-name org-gdoc-credentials-path))))
+         (output (shell-command-to-string convert-command)))
+    (if (string-match "^Error: " output)
+        (message "%s" output)
+      (with-temp-file output-file
+        (insert output))
+      (message "Converted Google Doc to %s" output-file))))
+
+(defun org-gdoc-download (output-file)
+  "Convert a local .gddoc file to an Org-mode file at OUTPUT-FILE.
+Prompt for the .gddoc file using find-file."
+  (interactive "FOutput Org-mode file: ")
+  (let ((gddoc-file (read-file-name "Select .gddoc file: " "~/" nil t ".gddoc")))
+    (if (file-exists-p gddoc-file)
+        (org-gdoc-convert output-file gddoc-file)
+      (message "Invalid .gddoc file selected"))))
+
+(provide 'org-gdoc)
+
+;;; org-gdoc.el ends here
