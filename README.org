@@ -1,59 +1,73 @@
 #+TITLE: org-gdoc
-#+AUTHOR: Bala Ramadurai <bala@balaramadurai.net>
 
-* Overview
+A simple workflow to bridge the gap between a single-file Org-mode manuscript and a folder of Google Docs (~.docx~ files), designed for writers who collaborate with editors using different tools.
 
-A package to convert locally synced Google Docs (=.gddoc= files) from Insync to Org-mode files in Emacs.
+This tool uses a Python backend with ~pandoc~ to handle document conversion and an Emacs Lisp wrapper for seamless integration into your Org-mode workflow.
 
-* Installation
+** Features
 
-** Steps
+Import: Combine an entire folder of ~.docx~ files into a single, well-structured Org-mode file.
 
-1. [[Clone the Repository][Clone the Repository]]:
-   #+BEGIN_SRC sh
-   git clone https://github.com/balaramadurai/org-gdoc.git ~/.emacs.d/lisp/org-gdoc
-   #+END_SRC
+Sync/Export: Push changes from any chapter (Org subtree) back to its corresponding ~.docx~ file.
 
-2. [[Add to Emacs Load Path][Add to Emacs Load Path]]:
-   Add the following to your Emacs configuration file (e.g., =~/.emacs.d/init.el=):
-   #+BEGIN_SRC emacs-lisp
-   (add-to-list 'load-path "~/.emacs.d/lisp/org-gdoc")
-   (require 'org-gdoc)
-   #+END_SRC
+Full-Buffer Sync: Sync all chapters in your manuscript with one command.
 
-3. [[Configure Paths][Configure Paths]]:
-   Customize the following variables:
-   - =org-gdoc-python-script-path=: Path to =gdoc_to_org.py= (default: =~/gdoc_to_org.py=).
-   - =org-gdoc-credentials-path=: Path to your Google API credentials JSON file (default: =~/gdoc-api-credentials.json=).
-   Example:
-   #+BEGIN_SRC emacs-lisp
-   (setq org-gdoc-python-script-path "~/gdoc_to_org.py")
-   (setq org-gdoc-credentials-path "~/my-credentials.json")
-   #+END_SRC
+Preserve Formatting: Use a reference ~.docx~ file to maintain consistent styling (fonts, headings, etc.) during export.
 
-4. [[Install Dependencies][Install Dependencies]]:
-   - Ensure Python 3 and the =google-auth-oauthlib= library are installed:
-     #+BEGIN_SRC sh
-     pip3 install google-auth-oauthlib
-     #+END_SRC
-   - Set up Google API credentials (follow Google’s OAuth guide and place the JSON file at the specified path).
+Smart Imports: Re-running an import on a folder will only add new documents, preventing duplicates.
 
-5. [[Byte Compile (Optional)][Byte Compile (Optional)]]:
-   #+BEGIN_SRC sh
-   emacs -batch -f batch-byte-compile ~/.emacs.d/lisp/org-gdoc/org-gdoc.el
-   #+END_SRC
+** Installation
 
-* Usage
+This package requires Python 3 and ~pandoc~.
 
-1. Run =M-x org-gdoc-download=.
-2. Specify the output Org-mode file path (e.g., =~/test.org=).
-3. Navigate to your Insync directory (e.g., =~/Insync/bala@balaramadurai.net/=) and select a =.gddoc= file.
-4. Check the =*Messages*= buffer for the conversion result.
+Install Pandoc:
+Follow the instructions for your operating system at [[https://pandoc.org/installing.html][pandoc.org/installing.html]].
 
-* License
+Install Python Dependencies:
+The Python script requires the ~python-docx~ and ~pypandoc~ libraries.
 
-This project is licensed under the MIT License - see the [[./LICENSE][LICENSE]] file for details.
+#+BEGIN_SRC sh
+pip install python-docx pypandoc
+#+END_SRC
 
-* Author
+Install with ~straight.el~ and ~use-package~:
+Assuming you have ~straight.el~ set up, you can add the following to your Emacs configuration (~init.el~ or ~ ~/.emacs.d/init.el~):
 
-Bala Ramadurai <bala@balaramadurai.net>
+#+BEGIN_SRC emacs-lisp
+(use-package org-gdoc
+:straight (org-gdoc :type git :host github :repo "balaramadurai/org-gdoc")
+:ensure t
+:config
+;; Optional: Set the path to your style reference document.
+;; Create a .docx file with your preferred styles (e.g., Arial font for
+;; Normal text), save it, and point this variable to it.
+(setq org-gdoc-reference-docx-path "~/Documents/Templates/manuscript_style.docx"))
+#+END_SRC
+
+** Usage
+
+Once installed, the following interactive commands become available:
+
+~M-x org-gdoc-import-from-folder~
+
+Prompts for a directory containing ~.docx~ files.
+
+Prompts for a destination path for the new master ~.org~ file.
+
+Imports all documents, creating a level-1 heading for each.
+
+~M-x org-gdoc-export-subtree~
+
+When inside a specific chapter (subtree) in your org file, this command syncs its content back to the original ~.docx~ file specified in the ~:SOURCE_FILE:~ property.
+
+~M-x org-gdoc-export-buffer~
+
+Iterates through all level-1 headings in your org file and syncs each one to its corresponding ~.docx~ file. This is the perfect command to run after a long writing session.
+
+** Acknowledgements
+
+This project was created by Bala Ramadurai with significant assistance and code generation from Google's Gemini 2.5 Pro.
+
+** License
+
+This project is licensed under the MIT License. See the ~LICENSE~ file for details.
