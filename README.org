@@ -1,81 +1,92 @@
-#+TITLE: org-gdoc
+#+AUTHOR: Bala Ramadurai
+#+EMAIL: bala@balaramadurai.net
+#+DESCRIPTION: A tool to sync between a master Org-mode file and a folder of .docx files.
+#+STARTUP: showeverything
+*Org-GDoc Sync*
+A workflow bridge for authors who write in Emacs Org-mode and collaborate with editors using Google Docs or Microsoft Word.
 
-A simple workflow to bridge the gap between a single-file Org-mode manuscript and a folder of Google Docs (~.docx~ files), designed for writers who collaborate with editors using different tools.
+This package provides a set of interactive Emacs functions to synchronize content between a single, master Org-mode manuscript and a directory of individual .docx chapter files. It uses =pandoc= for robust file conversion.
 
-This tool uses a Python backend with ~pandoc~ to handle document conversion and an Emacs Lisp wrapper for seamless integration into your Org-mode workflow.
-
-** Features
-
-Import: Combine an entire folder of ~.docx~ files into a single, well-structured Org-mode file.
-
-Sync/Export: Push changes from any chapter (Org subtree) back to its corresponding ~.docx~ file.
-
-Full-Buffer Sync: Sync all chapters in your manuscript with one command.
-
-Preserve Formatting: Use a reference ~.docx~ file to maintain consistent styling (fonts, headings, etc.) during export.
-
-Smart Imports: Re-running an import on a folder will only add new documents, preventing duplicates.
-
-** Installation
-
-This package requires Python 3 and ~pandoc~.
-
-Install Pandoc:
-Follow the instructions for your operating system at [[https://pandoc.org/installing.html][pandoc.org/installing.html]].
-
-Install Python Dependencies:
-The Python script requires the ~python-docx~ and ~pypandoc~ libraries.
-
+This tool was developed with the assistance of Gemini 2.5 Pro.
+* Features
+- Bulk Import :: Convert a folder of =.docx= files into a single, structured Org-mode file.
+- Single File Import :: Insert a single =.docx= file as a new chapter (subtree) at any point.
+- Split :: Export all top-level headings of an Org file into a folder of separate =.docx= files.
+- Two-Way Sync :: Push changes from an Org subtree to its corresponding =.docx= file, or pull changes back into Org-mode.
+- Metadata Preservation :: Handles titles and subtitles, storing them in the Org properties drawer for a clean round-trip.
+- Intelligent Hierarchy :: Automatically manages heading levels to maintain a correct document structure.
+- Style Control :: Use a reference =.docx= file to maintain consistent formatting (fonts, spacing, etc.) in all exported documents.
+* Installation & Setup
+** 1. Prerequisites
+You must have the following installed on your system:
+Pandoc: The universal document converter.
 #+BEGIN_SRC sh
-pip install python-docx pypandoc
+sudo apt-get install pandoc # Debian/Ubuntu
 #+END_SRC
-
-Install with ~straight.el~ and ~use-package~:
-Assuming you have ~straight.el~ set up, you can add the following to your Emacs configuration (~init.el~ or ~ ~/.emacs.d/init.el~):
-
+pypandoc: A Python wrapper for pandoc.
+#+BEGIN_SRC sh
+pip install pypandoc
+#+END_SRC
+** 2. Emacs Configuration
+This package is designed to be installed with =straight.el=. Add the following to your Emacs configuration:
 #+BEGIN_SRC emacs-lisp
 (use-package org-gdoc
-:straight (org-gdoc :type git :host github :repo "balaramadurai/org-gdoc")
-:ensure t
-:config
-;; Optional: Set the path to your style reference document.
-;; Create a .docx file with your preferred styles (e.g., Arial font for
-;; Normal text), save it, and point this variable to it.
-(setq org-gdoc-reference-docx-path "~/Documents/Templates/manuscript_style.docx"))
+:straight (org-gdoc
+:type git
+:host github
+:repo "balaramadurai/org-gdoc")
+:after (org))
 #+END_SRC
+The script will automatically find the Python backend, so no further path configuration is needed.
+** 3. (Highly Recommended) Create a Reference Doc for Styling
+To control the font and style of your exported =.docx= files, you should create a reference document.
+Open a new blank document in LibreOffice Writer or Microsoft Word.
+Modify the "Normal" style: Set your preferred font (e.g., Arial, 12pt), line spacing, and paragraph settings.
+Modify other styles like "Title", "Subtitle", "Heading 1", "Heading 2", etc., as needed.
+Save this file as =reference.docx= in a memorable location.
+Customize the org-gdoc-reference-doc variable in Emacs to point to this file.
+#+BEGIN_SRC emacs-lisp
+(setq org-gdoc-reference-doc "~/path/to/your/reference.docx")
+#+END_SRC
+Usage
+All commands are available via =M-x=.
+* Importing
+=org-gdoc-import-from-folder=: Prompts for a folder and imports all =.docx= files from it, appending them to the current Org file. It intelligently skips files that have already been imported.
 
-** Usage
+=org-gdoc-insert-subtree-from-new-file=: Prompts for a single =.docx= file and inserts it as a new subtree at the current cursor position.
+* Syncing
+=org-gdoc-export-subtree=: Exports the current subtree to its linked =.docx= file (determined by the =:SOURCE_FILE:= property).
 
-Once installed, the following interactive commands become available:
+=org-gdoc-update-subtree-from-source=: Replaces the content of the current subtree with the latest version from its linked =.docx= file.
+* Exporting
+=org-gdoc-export-buffer=: Exports all top-level subtrees in the current buffer to their respective =.docx= files.
 
-~M-x org-gdoc-import-from-folder~
+=org-gdoc-split-buffer-to-folder=: Splits the current Org file into multiple =.docx= files. Each top-level heading becomes a separate file in a folder you specify.
+How It Works: Metadata and Headings
+* Heading Hierarchy
+The script maintains a logical heading structure:
+| Google Doc Style | Org-mode Heading |
+|------------------+------------------|
+| Title | Level 1 () |
+| Subtitle | (Stored in properties) |
+| Heading 1 | Level 2 () |
+| Heading 2 | Level 3 () |
+| Heading 3 | Level 4 (****) |
+* Properties Drawer for Metadata
+Titles and subtitles are stored in the properties drawer of each subtree to ensure they are preserved during sync operations.
+#+BEGIN_SRC org
+My Chapter Title
+:PROPERTIES:
+:SOURCE_FILE: /path/to/my-chapter-title.docx
+:CUSTOM_ID: my-chapter-title
+:EXPORT_TITLE: My Chapter Title
+:EXPORT_SUBTITLE: An Interesting Subtitle
+:END:
+#+END_SRC
+On export, the script reads =:EXPORT_TITLE:= and =:EXPORT_SUBTITLE:= to set the title and subtitle in the =.docx= file.
+* Troubleshooting
+Error: "pypandoc" has no attribute ...: Your installed version of the pypandoc Python library may be out of date. Try upgrading it with =pip install --upgrade pypandoc=.
 
-Prompts for a directory containing ~.docx~ files.
-
-Prompts for a destination path for the new master ~.org~ file.
-
-Imports all documents, creating a level-1 heading for each.
-
-~M-x org-gdoc-import-single-file~
-
-Prompts for a single ~.docx~ file to import.
-
-Prompts for the target ~.org~ file to append to.
-
-Adds the document as a new chapter at the end of the file.
-
-~M-x org-gdoc-export-subtree~
-
-When inside a specific chapter (subtree) in your org file, this command syncs its content back to the original ~.docx~ file specified in the ~:SOURCE_FILE:~ property.
-
-~M-x org-gdoc-export-buffer~
-
-Iterates through all level-1 headings in your org file and syncs each one to its corresponding ~.docx~ file. This is the perfect command to run after a long writing session.
-
-** Acknowledgements
-
-This project was created by Bala Ramadurai with significant assistance and code generation from Google's Gemini 2.5 Pro.
-
-** License
-
-This project is licensed under the MIT License. See the ~LICENSE~ file for details.
+Fonts are incorrect on export: Ensure you have set up a reference.docx file and correctly configured the =org-gdoc-reference-doc= variable as described in the setup section.
+* License
+This project is licensed under the MIT License. See the =LICENSE= file for details.

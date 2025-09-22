@@ -1,186 +1,232 @@
-;;; org-gdoc.el --- Sync between a single Org-mode file and a folder of .docx files -*- lexical-binding: t; -*-
+;;; org-gdoc.el --- Sync between a single Org-mode file and a folder of docx files -*- lexical-binding: t; -*-
 
-;; Copyright © 2025 Bala Ramadurai <bala@balaramadurai.net>
-;;
+;; Copyright (C) 2024 Bala Ramadurai
 ;; Author: Bala Ramadurai <bala@balaramadurai.net>
-;; Maintainer: Bala Ramadurai <bala@balaramadurai.net>
-;; Created: 2025-09-10
-;; Version: 1.0
+;;         Assisted by Gemini 2.5 Pro
+;; URL: https://github.com/balaramadurai/org-gdoc
+;; Keywords: org, sync, docx, google-docs
+;; Version: 0.1
 ;; Package-Requires: ((emacs "27.1"))
-;; Homepage: https://github.com/balaramadurai/org-gdoc
-;;
+
 ;; This file is not part of GNU Emacs.
-;;
-;; This program is free software; you can redistribute it and/or modify
-;; it under the terms of the MIT License.
-;;
-;; This script was generated with the assistance of Gemini 2.5 Pro.
+
+;;; License:
+;; Permission is hereby granted, free of charge, to any person obtaining a copy
+;; of this software and associated documentation files (the "Software"), to deal
+;; in the Software without restriction, including without limitation the rights
+;; to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+;; copies of the Software, and to permit persons to whom the Software is
+;; furnished to do so, subject to the following conditions:
+
+;; The above copyright notice and this permission notice shall be included in all
+;; copies or substantial portions of the Software.
+
+;; THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+;; IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+;; FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+;; AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+;; LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+;; OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+;; SOFTWARE.
 
 ;;; Commentary:
-;;
-;; This package provides a bridge between a single Org-mode file used for
-;; long-form writing (e.g., a manuscript) and a folder of .docx files that
-;; an editor might work with. It allows for importing a directory of .docx
-;; files into a single Org file, and exporting changes from Org subtrees
-;; back to their corresponding .docx files.
+;; This package provides a bridge between a single, master Org-mode file and a
+;; directory of .docx files, a common workflow for writers collaborating with
+;; editors who use Google Docs or Microsoft Word. It uses a Python backend with
+;; the `pandoc` utility to handle file conversions.
 
 ;;; Code:
+(require 'org)
+(require 'thingatpt)
 
 (defgroup org-gdoc nil
-  "Settings for the org-gdoc sync tool."
+  "Settings for the org-gdoc synchronization tool."
   :group 'org)
 
-(defcustom org-gdoc-python-executable "python3"
-  "The path to the Python executable to run the sync script."
-  :type 'string
-  :group 'org)
+(defun org-gdoc--get-script-path ()
+  "Robustly find the path to the `org_gdoc_sync.py` script.
+This handles being run from source, from a straight.el `build` dir, or
+when the user has customized `org-gdoc-python-script`."
+  (if (and (boundp 'org-gdoc-python-script) org-gdoc-python-script)
+      org-gdoc-python-script
+    (let* ((el-file-path (or load-file-name buffer-file-name))
+           (el-dir (file-name-directory el-file-path)))
+      (cond
+       ;; Standard source layout
+       ((file-exists-p (expand-file-name "org_gdoc_sync.py" el-dir))
+        (expand-file-name "org_gdoc_sync.py" el-dir))
+       ;; straight.el layout: we are in build/, need to find repos/
+       ((string-match-p "/straight/build/" el-file-path)
+        (let* ((build-dir-name (file-name-nondirectory (directory-file-name el-dir)))
+               (repos-dir (expand-file-name "../repos/" el-dir))
+               (script-path (expand-file-name (concat build-dir-name "/org_gdoc_sync.py") repos-dir)))
+          (if (file-exists-p script-path)
+              script-path
+            (error "Could not find python script in straight.el repos dir: %s" script-path))))
+       (t (error "Could not automatically find org_gdoc_sync.py. Please set `org-gdoc-python-script`."))))))
 
-;; Correctly determine the path to the python script relative to this elisp file.
-(defvar org-gdoc-python-script
-  (let* ((el-file (or load-file-name buffer-file-name))
-         (el-dir (file-name-directory el-file)))
-    ;; If loaded by straight.el, the file is in a 'build' dir.
-    ;; The python script is in the corresponding 'repos' dir.
-    (if (string-match-p "/straight/build/" (directory-file-name el-dir))
-        (expand-file-name "org_gdoc_sync.py"
-                          (replace-regexp-in-string "/build/" "/repos/" el-dir))
-      ;; Fallback for local/manual loading
-      (expand-file-name "org_gdoc_sync.py" el-dir)))
-  "The full path to the org_gdoc_sync.py script.")
-
-(defcustom org-gdoc-reference-docx-path nil
-  "Path to a .docx file to use as a style reference for exports.
-This is crucial for preserving fonts and formatting. See the
-README for instructions on how to create this file properly
-using LibreOffice or Microsoft Word."
+(defcustom org-gdoc-python-script nil
+  "The full path to the `org_gdoc_sync.py` script.
+If nil, the script is assumed to be in the same directory as this .el file."
   :type '(file :must-match t)
   :group 'org-gdoc)
 
-(defun org-gdoc--run-import (args)
+(defcustom org-gdoc-python-executable "python3"
+  "The command to execute Python."
+  :type 'string
+  :group 'org-gdoc)
+
+(defcustom org-gdoc-reference-doc nil
+  "Path to a .docx file to use as a style reference for exports.
+Create a .docx file, modify its styles (e.g., set the 'Normal'
+style to use your preferred font and size), and point this
+variable to it. This ensures consistent formatting in the
+generated documents."
+  :type '(file :must-match t)
+  :group 'org-gdoc)
+
+(defun org-gdoc--run-import (args message-template)
   "Internal helper to run the import process and handle errors."
   (let* ((sync-buffer-name "*org-gdoc-sync*")
          (output-buffer (get-buffer-create sync-buffer-name))
-         (process-args (append (list org-gdoc-python-script "import") args)))
-    (with-current-buffer output-buffer
-      (erase-buffer))
-    (let* ((exit-code (apply #'call-process org-gdoc-python-executable nil output-buffer nil process-args)))
+         (script-path (org-gdoc--get-script-path))
+         (process-args (append (list script-path "import") args)))
+    (with-current-buffer output-buffer (erase-buffer))
+    (let ((exit-code (apply #'call-process org-gdoc-python-executable nil output-buffer nil process-args)))
       (if (= exit-code 0)
           (progn
-            (when (get-buffer sync-buffer-name)
-              (kill-buffer sync-buffer-name))
-            t)
-        (progn
-          (pop-to-buffer sync-buffer-name)
-          (error "Org-gdoc import failed. See the %s buffer for details." sync-buffer-name)
-          nil)))))
+            (message message-template)
+            (when (get-buffer sync-buffer-name) (kill-buffer sync-buffer-name)))
+        (pop-to-buffer sync-buffer-name)
+        (error "Org-gdoc import failed. See *org-gdoc-sync* buffer for details.")))))
 
 ;;;###autoload
 (defun org-gdoc-import-from-folder ()
-  "Import all .docx files from a folder into a single Org-mode file."
+  "Import all .docx files from a folder into the current Org buffer.
+The function will only import documents that are not already
+present in the file (based on the :SOURCE_FILE: property)."
   (interactive)
-  (let* ((folder (read-directory-name "Import from folder: "))
-         (target-file (read-file-name "Into Org file: " nil nil t)))
-    (message "Importing from %s..." folder)
-    (when (org-gdoc--run-import (list "--folder" folder "--output" target-file))
-      (message "Successfully imported documents into %s" target-file))))
-
-;;;###autoload
-(defun org-gdoc-import-single-file ()
-  "Import a single .docx file into an Org-mode file."
-  (interactive)
-  (let* ((source-file (read-file-name "Import .docx file: " nil nil t))
-         (target-file (read-file-name "Into Org file: " nil nil t)))
-    (message "Importing %s into %s..." source-file target-file)
-    (when (org-gdoc--run-import (list "--file" source-file "--output" target-file))
-      (message "Successfully imported %s into %s" source-file target-file))))
+  (let ((folder (read-directory-name "Import from folder: "))
+        (output-file (buffer-file-name)))
+    (if (not output-file)
+        (error "Buffer is not visiting a file")
+      (message "Importing from %s..." folder)
+      (org-gdoc--run-import (list "--folder" folder "--output" output-file)
+                            (format "Successfully imported new documents from %s" folder)))))
 
 ;;;###autoload
 (defun org-gdoc-insert-subtree-from-new-file ()
-  "Prompt for a .docx file and insert it as a new subtree at point."
+  "Import a single .docx file and insert its content as a new subtree at point."
   (interactive)
-  (let ((source-file (read-file-name "Import .docx file as new subtree: ")))
-    (if (not (file-exists-p source-file))
-        (error "File does not exist: %s" source-file)
-      (message "Importing %s as a new subtree..." source-file)
-      (let ((temp-file (make-temp-file "org-gdoc-insert-")))
-        (unwind-protect
-            (progn
-              (when (org-gdoc--run-import (list "--file" source-file "--output" temp-file))
-                (save-excursion
-                  (let ((content (with-temp-buffer
-                                   (insert-file-contents temp-file)
-                                   (buffer-string))))
-                    (insert (string-trim content) "\n")))
-                (message "Successfully imported %s as a new subtree." source-file)))
-          (when (file-exists-p temp-file)
-            (delete-file temp-file)))))))
-
-;;;###autoload
-(defun org-gdoc-update-subtree-from-source ()
-  "Update current subtree by re-importing from its :SOURCE_FILE:."
-  (interactive)
-  (let ((source-file (org-entry-get nil "SOURCE_FILE")))
-    (if (and source-file (file-exists-p (expand-file-name source-file)))
-        (let* ((bounds (org-element-context))
-               (start (org-element-property :begin bounds))
-               (end (org-element-property :end bounds))
-               (temp-file (make-temp-file "org-gdoc-update-")))
-          (unwind-protect
-              (progn
-                (message "Updating subtree from %s..." source-file)
-                (when (org-gdoc--run-import (list "--file" source-file "--output" temp-file))
-                  (let ((new-content (with-temp-buffer
-                                       (insert-file-contents temp-file)
-                                       (buffer-string))))
-                    (delete-region start end)
-                    (goto-char start)
-                    (insert (string-trim new-content) "\n")
-                    (message "Successfully updated subtree from %s" source-file))))
-            (when (file-exists-p temp-file)
-              (delete-file temp-file))))
-      (warn "No valid :SOURCE_FILE: property found for the current subtree."))))
-
-(defun org-gdoc--export-subtree-at (point)
-  "Helper function to export the subtree at a given POINT."
-  (goto-char point)
-  (let ((source-file (org-entry-get nil "SOURCE_FILE")))
-    (if (and source-file (file-exists-p (expand-file-name source-file)))
-        (let* ((bounds (org-element-context))
-               (start (org-element-property :begin bounds))
-               (end (org-element-property :end bounds))
-               (args (list org-gdoc-python-script
-                           "export"
-                           "--target-file" source-file
-                           "--quiet"))
-               (sync-buffer-name "*org-gdoc-sync*"))
-          (when org-gdoc-reference-docx-path
-            (setq args (append args (list "--reference-doc" org-gdoc-reference-docx-path))))
-          (message "Syncing subtree to %s..." source-file)
-          (let ((exit-code (apply #'call-process-region start end org-gdoc-python-executable nil (get-buffer-create sync-buffer-name) nil args)))
-            (if (= exit-code 0)
-                (progn
-                  (when (get-buffer sync-buffer-name)
-                    (kill-buffer sync-buffer-name))
-                  (message "Subtree successfully synced to %s" source-file))
-              (progn
-                (pop-to-buffer sync-buffer-name)
-                (error "Org-gdoc export failed. See *org-gdoc-sync* buffer for details.")))))
-      (warn "No valid :SOURCE_FILE: property found for the current subtree."))))
+  (let ((source-file (read-file-name "Import .docx file: " nil nil t))
+        (temp-file (make-temp-file "org-gdoc-import-")))
+    (message "Importing %s..." source-file)
+    (org-gdoc--run-import (list "--file" source-file "--output" temp-file)
+                          "") ;; Don't show success message for this part
+    (save-excursion
+      (insert-file-contents temp-file)
+      (delete-file temp-file))
+    (message "Successfully inserted content from %s" source-file)))
 
 ;;;###autoload
 (defun org-gdoc-export-subtree ()
-  "Export the current Org subtree back to its original .docx file."
+  "Export the current subtree to its corresponding .docx file.
+Uses the :SOURCE_FILE: property in the drawer to determine the
+target file path."
   (interactive)
-  (org-gdoc--export-subtree-at (point)))
+  (save-excursion
+    (org-back-to-heading t)
+    (let* ((source-file (org-entry-get (point) "SOURCE_FILE"))
+           (start (point))
+           (end (progn (org-end-of-subtree) (point)))
+           (sync-buffer-name "*org-gdoc-sync*")
+           (output-buffer (get-buffer-create sync-buffer-name))
+           (script-path (org-gdoc--get-script-path)))
+      (unless source-file
+        (error "No :SOURCE_FILE: property found in the current subtree"))
+      (message "Syncing subtree to %s..." source-file)
+      (with-current-buffer output-buffer (erase-buffer))
+      (let* ((args (list script-path "export" "--target-file" source-file "--quiet"))
+             (full-args (if org-gdoc-reference-doc
+                            (append args (list "--reference-doc" org-gdoc-reference-doc))
+                          args))
+             (exit-code (apply #'call-process-region start end org-gdoc-python-executable nil output-buffer nil full-args)))
+        (if (= exit-code 0)
+            (progn
+              (message "Subtree successfully synced to %s" source-file)
+              (when (get-buffer sync-buffer-name) (kill-buffer sync-buffer-name)))
+          (pop-to-buffer sync-buffer-name)
+          (error "Org-gdoc export failed. See *org-gdoc-sync* buffer for details."))))))
 
 ;;;###autoload
 (defun org-gdoc-export-buffer ()
-  "Iterate through all level-1 headings and export each to its .docx file."
+  "Export all top-level subtrees in the buffer to their .docx files."
   (interactive)
   (save-excursion
-    (message "Starting full buffer export...")
-    (org-map-entries #'org-gdoc--export-subtree-at "LEVEL=1" 'file))
-  (message "Full buffer export complete."))
+    (goto-char (point-min))
+    (message "Exporting all subtrees in the buffer...")
+    ;; `org-map-entries` is the robust way to iterate over headings.
+    ;; We call `org-gdoc-export-subtree` for each level-1 heading.
+    (org-map-entries #'org-gdoc-export-subtree "LEVEL=1" 'file)
+    (message "Finished exporting all subtrees.")))
+
+;;;###autoload
+(defun org-gdoc-update-subtree-from-source ()
+  "Update the current subtree by re-importing from its :SOURCE_FILE:."
+  (interactive)
+  (save-excursion
+    (org-back-to-heading t)
+    (let* ((source-file (org-entry-get (point) "SOURCE_FILE"))
+           (temp-file (make-temp-file "org-gdoc-update-"))
+           (start (point)))
+      (unless source-file
+        (error "No :SOURCE_FILE: property found in current subtree"))
+      (message "Updating subtree from %s..." source-file)
+      ;; 1. Import the docx content into a temporary org file.
+      (org-gdoc--run-import (list "--file" source-file "--output" temp-file) "")
+      ;; 2. Delete the current subtree.
+      (org-end-of-subtree)
+      (delete-region start (point))
+      ;; 3. Insert the new content from the temp file.
+      (goto-char start)
+      (insert-file-contents temp-file)
+      (delete-file temp-file)
+      (message "Subtree successfully updated from %s." source-file))))
+
+;;;###autoload
+(defun org-gdoc-split-buffer-to-folder ()
+  "Split the current Org buffer into multiple .docx files in a directory.
+Each top-level heading in the buffer becomes a separate .docx file."
+  (interactive)
+  (when (buffer-modified-p)
+    (when (y-or-n-p "Buffer is modified; save it first? ")
+      (save-buffer)))
+  (let* ((source-file (buffer-file-name))
+         (output-folder (read-directory-name "Output folder for .docx files: ")))
+    (if (not source-file)
+        (error "Buffer is not visiting a file")
+      (message "Splitting %s into %s..." (file-name-nondirectory source-file) output-folder)
+      (let* ((script-path (org-gdoc--get-script-path))
+             (args (list script-path
+                           "split"
+                           "--source-file" source-file
+                           "--output-folder" output-folder))
+             (sync-buffer-name "*org-gdoc-sync*")
+             (output-buffer (get-buffer-create sync-buffer-name)))
+
+        (when org-gdoc-reference-doc
+          (setq args (append args (list "--reference-doc" org-gdoc-reference-doc))))
+
+        (with-current-buffer output-buffer (erase-buffer))
+        
+        (let ((exit-code (apply #'call-process org-gdoc-python-executable nil output-buffer nil args)))
+          (if (= exit-code 0)
+              (progn
+                (message "Successfully split buffer into .docx files in %s." output-folder)
+                (when (get-buffer sync-buffer-name) (kill-buffer sync-buffer-name)))
+            (pop-to-buffer sync-buffer-name)
+            (error "Org-gdoc split failed. See *org-gdoc-sync* buffer for details.")))))))
+
 
 (provide 'org-gdoc)
 
