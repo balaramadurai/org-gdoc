@@ -1,200 +1,214 @@
-# org_gdoc_sync.py
-#
-# This script handles the conversion between a directory of .docx files and
-# a single Org-mode file. It's designed to be called by an Emacs Lisp wrapper.
-#
-# Dependencies:
-# - Python 3
-# - Pandoc: Make sure the `pandoc` command is in your system's PATH.
-#   (e.g., on Debian/Ubuntu: `sudo apt-get install pandoc`)
-
+import argparse
 import os
 import sys
-import subprocess
-import argparse
-import shlex
+import glob
+import pypandoc
+from docx import Document
 
-# --- Configuration ---
-# Directory to store images extracted from .docx files.
-# This will be created relative to the output Org file.
-IMAGE_DIR_NAME = "org-gdoc-images"
+def get_existing_sources(org_file_path):
+    """
+    Parses an existing org file and returns a set of all :SOURCE_FILE: properties.
+    All paths are fully resolved to be absolute for reliable comparison.
+    """
+    sources = set()
+    if not os.path.exists(org_file_path):
+        return sources
 
-def run_pandoc(command):
-    """Executes a pandoc command and handles errors."""
+    with open(org_file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            if line.strip().startswith(':SOURCE_FILE:'):
+                path = line.split(':', 2)[-1].strip()
+                if path:
+                    # Resolve to the canonical path to avoid any ambiguity
+                    normalized_path = os.path.realpath(os.path.expanduser(path))
+                    sources.add(normalized_path)
+    return sources
+
+def import_documents(args):
+    """
+    Imports .docx files from a folder or a single file into one .org file.
+    """
+    output_file = os.path.expanduser(args.output)
+    existing_sources = get_existing_sources(output_file)
+    docx_files_to_import = []
+
+    if args.folder:
+        folder_path = os.path.expanduser(args.folder)
+        if not os.path.isdir(folder_path):
+            print(f"Error: Folder not found at '{folder_path}'", file=sys.stderr)
+            sys.exit(1)
+        all_docx_files = sorted(glob.glob(os.path.join(folder_path, '*.docx')))
+        for docx_path in all_docx_files:
+            # Always compare the canonical path
+            normalized_path = os.path.realpath(docx_path)
+            if normalized_path not in existing_sources:
+                docx_files_to_import.append(normalized_path)
+    elif args.file:
+        normalized_path = os.path.realpath(os.path.expanduser(args.file))
+        if normalized_path not in existing_sources:
+            docx_files_to_import.append(normalized_path)
+        else:
+            print(f"'{os.path.basename(normalized_path)}' has already been imported. Skipping.")
+            return
+
+    if not docx_files_to_import:
+        print("No new documents to import.")
+        return
+
+    with open(output_file, 'a', encoding='utf-8') as f:
+        for docx_path in docx_files_to_import:
+            try:
+                # --- NEW LOGIC ---
+                # This new logic respects the internal structure of the document.
+                # It finds the first heading in the docx, promotes it to level 1,
+                # and attaches the properties to it. It only creates a heading
+                # from the filename if no heading is found in the document.
+
+                # Tell pandoc to demote all headings by one level.
+                # A "Heading 1" in docx becomes a level 2 heading ('**') in Org.
+                extra_args = ['--base-header-level=2']
+                org_content_raw = pypandoc.convert_file(docx_path, 'org', format='docx', extra_args=extra_args)
+
+                lines = org_content_raw.strip().split('\n')
+
+                first_heading_index = -1
+                for i, line in enumerate(lines):
+                    # Find the first demoted heading
+                    if line.strip().startswith('** '):
+                        first_heading_index = i
+                        break
+
+                final_content = ""
+                title = ""
+
+                if first_heading_index != -1:
+                    # A heading was found in the document, use it as the main heading
+                    heading_line = lines[first_heading_index]
+                    title = heading_line.lstrip('** ').strip()
+
+                    # Promote the heading to level 1
+                    promoted_heading = '* ' + title
+
+                    # Build the properties drawer
+                    custom_id = title.lower().replace(' ', '-').replace('_', '-')
+                    properties = [
+                        ":PROPERTIES:",
+                        f":SOURCE_FILE: {docx_path}",
+                        f":CUSTOM_ID: {custom_id}",
+                        ":END:"
+                    ]
+
+                    # Replace the original heading line with the new heading + properties
+                    lines[first_heading_index:first_heading_index+1] = [promoted_heading] + properties
+                    final_content = '\n'.join(lines)
+
+                else:
+                    # No heading found in the document, create one from the filename as a fallback
+                    title = os.path.splitext(os.path.basename(docx_path))[0]
+                    custom_id = title.lower().replace(' ', '-').replace('_', '-')
+
+                    header = [
+                        f"* {title}",
+                        ":PROPERTIES:",
+                        f":SOURCE_FILE: {docx_path}",
+                        f":CUSTOM_ID: {custom_id}",
+                        ":END:"
+                    ]
+
+                    final_content = '\n'.join(header) + '\n\n' + org_content_raw
+
+                f.write(f"\n{final_content.strip()}\n")
+
+            except Exception as e:
+                print(f"    Error converting {docx_path}: {e}", file=sys.stderr)
+
+
+def export_document(args):
+    """
+    Exports content from stdin to a .docx file.
+    """
+    target_file = os.path.expanduser(args.target_file)
+    reference_doc = os.path.expanduser(args.reference_doc) if args.reference_doc else None
+
+    org_content_raw = sys.stdin.read()
+
+    # --- NEW EXPORT LOGIC ---
+    # The stdin contains the entire org subtree, including the heading and
+    # properties drawer. We must strip these before converting to docx to
+    # avoid them appearing as content in the final document.
+    lines = org_content_raw.strip().split('\n')
+    
+    clean_lines = []
+    in_properties_drawer = False
+    heading_skipped = False
+
+    for line in lines:
+        stripped_line = line.strip()
+
+        # Skip the first line if it's the main heading for the subtree
+        if not heading_skipped and stripped_line.startswith('* '):
+            heading_skipped = True
+            continue
+
+        # Skip the properties drawer that immediately follows the heading
+        if heading_skipped and not in_properties_drawer and stripped_line == ':PROPERTIES:':
+            in_properties_drawer = True
+            continue
+        if in_properties_drawer and stripped_line == ':END:':
+            in_properties_drawer = False
+            continue
+        if in_properties_drawer:
+            continue
+        
+        # Only append lines after we've passed the heading and its properties
+        if heading_skipped:
+             clean_lines.append(line)
+
+    # Remove any leading blank lines that may have resulted from the cleanup
+    while clean_lines and not clean_lines[0].strip():
+        clean_lines.pop(0)
+
+    org_content_clean = '\n'.join(clean_lines)
+    # --- END NEW EXPORT LOGIC ---
+
+    extra_args = []
+    if reference_doc and os.path.exists(reference_doc):
+        extra_args.append(f'--reference-doc={reference_doc}')
+
     try:
-        # We use shlex.split to handle paths with spaces correctly
-        process = subprocess.run(
-            shlex.split(command),
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding='utf-8'
+        pypandoc.convert_text(
+            org_content_clean, # Use the cleaned content
+            'docx',
+            format='org',
+            outputfile=target_file,
+            extra_args=extra_args
         )
-        return process.stdout
-    except FileNotFoundError:
-        print("ERROR: `pandoc` command not found.", file=sys.stderr)
-        print("Please install pandoc and ensure it's in your system's PATH.", file=sys.stderr)
-        sys.exit(1)
-    except subprocess.CalledProcessError as e:
-        print(f"ERROR: Pandoc failed with exit code {e.returncode}", file=sys.stderr)
-        print(f"Pandoc command: {e.cmd}", file=sys.stderr)
-        print(f"Pandoc stderr:\n{e.stderr}", file=sys.stderr)
-        sys.exit(1)
+        if not args.quiet:
+            print(f"Successfully synced content to '{target_file}'.")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}", file=sys.stderr)
+        print(f"Error: Failed to export to '{target_file}'.\nPandoc error: {e}", file=sys.stderr)
         sys.exit(1)
-
-
-def import_docx_to_org(docx_folder, output_org_file):
-    """
-    Imports .docx files from a folder into a single Org-mode file.
-    If the org file already exists, this function will only import new
-    .docx files that are not already referenced in the org file.
-    """
-    docx_folder = os.path.expanduser(docx_folder)
-    output_org_file = os.path.expanduser(output_org_file)
-
-    if not os.path.isdir(docx_folder):
-        print(f"Error: Folder not found at '{docx_folder}'", file=sys.stderr)
-        return
-
-    output_dir = os.path.dirname(os.path.abspath(output_org_file))
-    image_dir = os.path.join(output_dir, IMAGE_DIR_NAME)
-    os.makedirs(image_dir, exist_ok=True)
-    
-    docx_files = sorted([f for f in os.listdir(docx_folder) if f.lower().endswith('.docx')])
-    if not docx_files:
-        print(f"No .docx files found in '{docx_folder}'", file=sys.stderr)
-        return
-
-    # --- UPDATED LOGIC: Distinguish between fresh import and update ---
-    existing_sources = set()
-    is_update = os.path.exists(output_org_file) and os.path.getsize(output_org_file) > 0
-
-    if is_update:
-        # --- UPDATE MODE ---
-        print(f"Scanning existing file for updates: {output_org_file}")
-        with open(output_org_file, 'r', encoding='utf-8') as f:
-            for line in f:
-                cleaned_line = line.strip()
-                if cleaned_line.startswith(":SOURCE_FILE:"):
-                    path = cleaned_line.replace(":SOURCE_FILE:", "").strip()
-                    if path:
-                        existing_sources.add(os.path.abspath(path))
-        
-        content_to_append = ""
-        new_files_count = 0
-        for filename in docx_files:
-            full_docx_path = os.path.abspath(os.path.join(docx_folder, filename))
-            if full_docx_path in existing_sources:
-                continue  # Skip files that are already in the org file
-
-            # This is a new file, so we process it.
-            print(f"Importing new file: '{filename}'...")
-            new_files_count += 1
-            chapter_title = os.path.splitext(filename)[0]
-            command = (f'pandoc "{full_docx_path}" --from docx --to org ' f'--extract-media="{image_dir}"')
-            org_content = run_pandoc(command)
-
-            content_to_append += f"* {chapter_title}\n"
-            content_to_append += ":PROPERTIES:\n"
-            content_to_append += f":SOURCE_FILE: {full_docx_path}\n"
-            content_to_append += ":END:\n\n"
-            content_to_append += org_content.strip() + "\n\n"
-
-        if content_to_append:
-            with open(output_org_file, 'a', encoding='utf-8') as f:
-                f.write("\n" + content_to_append.strip())
-            print(f"\nSuccessfully added {new_files_count} new document(s) to '{output_org_file}'.")
-        else:
-            print("\nNo new documents found to import.")
-    else:
-        # --- FRESH IMPORT MODE ---
-        print(f"Creating new file: {output_org_file}")
-        print(f"Image directory set to: {image_dir}")
-        full_org_content = ""
-        for filename in docx_files:
-            chapter_title = os.path.splitext(filename)[0]
-            full_docx_path = os.path.join(docx_folder, filename)
-            print(f"Processing '{filename}'...")
-            command = (f'pandoc "{full_docx_path}" --from docx --to org ' f'--extract-media="{image_dir}"')
-            org_content = run_pandoc(command)
-
-            full_org_content += f"* {chapter_title}\n"
-            full_org_content += ":PROPERTIES:\n"
-            full_org_content += f":SOURCE_FILE: {os.path.abspath(full_docx_path)}\n"
-            full_org_content += ":END:\n\n"
-            full_org_content += org_content.strip() + "\n\n"
-        
-        with open(output_org_file, 'w', encoding='utf-8') as f:
-            f.write(full_org_content.strip())
-        print(f"\nSuccessfully imported {len(docx_files)} documents into '{output_org_file}'.")
-
-
-def export_org_to_docx(target_docx_file, reference_doc=None, quiet=False):
-    """
-    Converts Org-mode content from stdin to a .docx file.
-    """
-    target_docx_file = os.path.expanduser(target_docx_file)
-
-    if not quiet:
-        print(f"Exporting to '{target_docx_file}'...")
-    
-    org_content = sys.stdin.read()
-
-    command = (
-        f'pandoc --from org --to docx '
-        f'--output "{target_docx_file}"'
-    )
-    
-    # Add reference-doc if provided
-    if reference_doc:
-        ref_doc_path = os.path.expanduser(reference_doc)
-        if os.path.exists(ref_doc_path):
-            command += f' --reference-doc "{ref_doc_path}"'
-        else:
-            print(f"Warning: Reference doc not found at '{ref_doc_path}'. Using pandoc defaults.", file=sys.stderr)
-
-    try:
-        with open('pandoc_temp_input.org', 'w', encoding='utf-8') as temp_f:
-            temp_f.write(org_content)
-        
-        full_command = command + ' "pandoc_temp_input.org"'
-        run_pandoc(full_command)
-        os.remove('pandoc_temp_input.org')
-
-    except Exception as e:
-        print(f"Error during export: {e}", file=sys.stderr)
-        if os.path.exists('pandoc_temp_input.org'):
-            os.remove('pandoc_temp_input.org')
-        sys.exit(1)
-
-    if not quiet:
-        print(f"Successfully synced content to '{target_docx_file}'.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Sync between Google Docs (.docx) and an Emacs Org-mode file.")
+    parser = argparse.ArgumentParser(description='A tool to sync between a single Org-mode file and a folder of .docx files.')
     subparsers = parser.add_subparsers(dest='command', required=True)
 
-    # Import command
-    parser_import = subparsers.add_parser('import', help='Import all .docx from a folder into one .org file.')
-    parser_import.add_argument('--folder', required=True, help='Path to the folder containing .docx files.')
+    parser_import = subparsers.add_parser('import', help='Import .docx files into an Org file.')
+    import_group = parser_import.add_mutually_exclusive_group(required=True)
+    import_group.add_argument('--folder', help='Path to the folder containing .docx files.')
+    import_group.add_argument('--file', help='Path to a single .docx file to import.')
     parser_import.add_argument('--output', required=True, help='Path for the destination .org file.')
+    parser_import.set_defaults(func=import_documents)
 
-    # Export command
-    parser_export = subparsers.add_parser('export', help='Export an org-mode subtree (from stdin) to its corresponding .docx file.')
-    parser_export.add_argument('--target-file', required=True, help='The absolute path of the target .docx file to overwrite.')
-    parser_export.add_argument('--reference-doc', help='Path to a .docx file with styles to use as a template.')
+    parser_export = subparsers.add_parser('export', help='Export an Org subtree to a .docx file.')
+    parser_export.add_argument('--target-file', required=True, help='The .docx file to write to.')
+    parser_export.add_argument('--reference-doc', help='Path to a .docx file to use as a style reference.')
     parser_export.add_argument('--quiet', action='store_true', help='Suppress success messages on stdout.')
-
+    parser_export.set_defaults(func=export_document)
 
     args = parser.parse_args()
-
-    if args.command == 'import':
-        import_docx_to_org(args.folder, args.output)
-    elif args.command == 'export':
-        export_org_to_docx(args.target_file, args.reference_doc, args.quiet)
+    args.func(args)
 
 if __name__ == '__main__':
     main()

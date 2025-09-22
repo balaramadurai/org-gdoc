@@ -56,6 +56,14 @@ Prompts for a destination path for the new master ~.org~ file.
 
 Imports all documents, creating a level-1 heading for each.
 
+~M-x org-gdoc-import-single-file~
+
+Prompts for a single ~.docx~ file to import.
+
+Prompts for the target ~.org~ file to append to.
+
+Adds the document as a new chapter at the end of the file.
+
 ~M-x org-gdoc-export-subtree~
 
 When inside a specific chapter (subtree) in your org file, this command syncs its content back to the original ~.docx~ file specified in the ~:SOURCE_FILE:~ property.
