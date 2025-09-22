@@ -5,7 +5,7 @@
 ;; Author: Bala Ramadurai <bala@balaramadurai.net>
 ;; Maintainer: Bala Ramadurai <bala@balaramadurai.net>
 ;; Created: 2025-09-10
-;; Version: 0.8
+;; Version: 1.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Homepage: https://github.com/balaramadurai/org-gdoc
 ;;
@@ -37,8 +37,15 @@
 
 ;; Correctly determine the path to the python script relative to this elisp file.
 (defvar org-gdoc-python-script
-  (expand-file-name "org_gdoc_sync.py"
-                    (file-name-directory (or load-file-name buffer-file-name)))
+  (let* ((el-file (or load-file-name buffer-file-name))
+         (el-dir (file-name-directory el-file)))
+    ;; If loaded by straight.el, the file is in a 'build' dir.
+    ;; The python script is in the corresponding 'repos' dir.
+    (if (string-match-p "/straight/build/" (directory-file-name el-dir))
+        (expand-file-name "org_gdoc_sync.py"
+                          (replace-regexp-in-string "/build/" "/repos/" el-dir))
+      ;; Fallback for local/manual loading
+      (expand-file-name "org_gdoc_sync.py" el-dir)))
   "The full path to the org_gdoc_sync.py script.")
 
 (defcustom org-gdoc-reference-docx-path nil
@@ -95,15 +102,18 @@ using LibreOffice or Microsoft Word."
     (if (not (file-exists-p source-file))
         (error "File does not exist: %s" source-file)
       (message "Importing %s as a new subtree..." source-file)
-      (let* ((command (list org-gdoc-python-executable
-                            org-gdoc-python-script
-                            "convert" "--file" (shell-quote-argument source-file)))
-             (subtree-content (shell-command-to-string (string-join command " "))))
-        (if (string-empty-p (string-trim subtree-content))
-            (error "Import failed. Python script returned no output.")
-          (save-excursion
-            (insert subtree-content))
-          (message "Successfully imported %s as a new subtree." source-file))))))
+      (let ((temp-file (make-temp-file "org-gdoc-insert-")))
+        (unwind-protect
+            (progn
+              (when (org-gdoc--run-import (list "--file" source-file "--output" temp-file))
+                (save-excursion
+                  (let ((content (with-temp-buffer
+                                   (insert-file-contents temp-file)
+                                   (buffer-string))))
+                    (insert (string-trim content) "\n")))
+                (message "Successfully imported %s as a new subtree." source-file)))
+          (when (file-exists-p temp-file)
+            (delete-file temp-file)))))))
 
 ;;;###autoload
 (defun org-gdoc-update-subtree-from-source ()
@@ -114,20 +124,21 @@ using LibreOffice or Microsoft Word."
         (let* ((bounds (org-element-context))
                (start (org-element-property :begin bounds))
                (end (org-element-property :end bounds))
-               (command (list org-gdoc-python-executable
-                              org-gdoc-python-script
-                              "convert" "--file" (shell-quote-argument source-file)))
-               (new-subtree-content (shell-command-to-string (string-join command " "))))
-          (if (string-empty-p (string-trim new-subtree-content))
-              (error "Import failed. Python script returned no output for %s" source-file)
-            (message "Updating subtree from %s..." source-file)
-            (delete-region start end)
-            (goto-char start)
-            ;; Trim whitespace from shell command output before inserting
-            (insert (string-trim new-subtree-content) "\n")
-            (message "Successfully updated subtree from %s" source-file)))
+               (temp-file (make-temp-file "org-gdoc-update-")))
+          (unwind-protect
+              (progn
+                (message "Updating subtree from %s..." source-file)
+                (when (org-gdoc--run-import (list "--file" source-file "--output" temp-file))
+                  (let ((new-content (with-temp-buffer
+                                       (insert-file-contents temp-file)
+                                       (buffer-string))))
+                    (delete-region start end)
+                    (goto-char start)
+                    (insert (string-trim new-content) "\n")
+                    (message "Successfully updated subtree from %s" source-file))))
+            (when (file-exists-p temp-file)
+              (delete-file temp-file))))
       (warn "No valid :SOURCE_FILE: property found for the current subtree."))))
-
 
 (defun org-gdoc--export-subtree-at (point)
   "Helper function to export the subtree at a given POINT."
