@@ -4,38 +4,46 @@ import pypandoc
 import re
 import sys
 import tempfile
-from pathlib import Path
+# No longer using pathlib
 
 def get_document_title_and_id(path):
     """Generates a title and a CUSTOM_ID from a file path."""
-    title = Path(path).stem
+    base_name = os.path.basename(path)
+    title = os.path.splitext(base_name)[0]
     # Create a simple, clean ID for org-mode
     custom_id = re.sub(r'[^a-zA-Z0-9]+', '-', title).lower().strip('-')
     return title, custom_id
 
-def convert_docx_to_org(source_path, existing_org_file=None):
+def convert_docx_to_org(source_path_str):
     """
-    Converts a .docx file to a string of Org-mode content by reliably extracting
-    metadata and body content in separate, robust steps.
+    Converts a .docx file to a string of Org-mode content by passing the file's
+    content directly to pandoc, avoiding filesystem path issues.
+    Expects source_path_str to be a string.
     """
-    abs_source_path = str(Path(source_path).resolve())
-    fallback_title, custom_id = get_document_title_and_id(source_path)
+    abs_source_path = os.path.realpath(os.path.expanduser(source_path_str))
+    fallback_title, custom_id = get_document_title_and_id(source_path_str)
 
     doc_title = None
     doc_subtitle = None
 
-    # --- New, robust metadata extraction using a pandoc template ---
-    # Create a temporary template to extract title and subtitle variables.
+    # Read the docx file content once to pass to the converter.
+    try:
+        with open(source_path_str, 'rb') as f:
+            docx_content = f.read()
+    except IOError as e:
+        print(f"Error: Could not read file {source_path_str}: {e}")
+        return "" # Return empty string on failure
+
+    # --- Metadata extraction using a pandoc template ---
     metadata_template_content = "TITLE_VAR:$title$\nSUBTITLE_VAR:$subtitle$"
     with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".txt", encoding='utf-8') as temp_template:
         temp_template.write(metadata_template_content)
         metadata_template_path = temp_template.name
 
     try:
-        # Extract metadata by running pandoc with the custom template via extra_args
-        # for broader pypandoc version compatibility.
-        metadata_output = pypandoc.convert_file(
-            source_path, 'plain',
+        # Use convert_text to bypass filesystem issues in pypandoc.
+        metadata_output = pypandoc.convert_text(
+            docx_content, 'plain', format='docx',
             extra_args=[f"--template={metadata_template_path}"]
         ).strip()
         for line in metadata_output.split('\n'):
@@ -47,29 +55,26 @@ def convert_docx_to_org(source_path, existing_org_file=None):
                 if val: doc_subtitle = val
     finally:
         os.remove(metadata_template_path)
-    # --- End of metadata extraction ---
 
-    # --- New, clean body extraction using a pandoc template ---
+    # --- Body content extraction using a pandoc template ---
     body_template_content = "$body$"
     with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix=".txt", encoding='utf-8') as temp_template:
         temp_template.write(body_template_content)
         body_template_path = temp_template.name
 
     try:
-        # Extract just the body content, demoting headings.
-        # Pass template via extra_args for compatibility.
         body_extra_args = [
             f"--template={body_template_path}",
             "--wrap=none",
-            "--base-header-level=2"
+            "--shift-heading-level-by=1" # Shift H1->H2, H2->H3, etc.
         ]
-        body_content = pypandoc.convert_file(
-            source_path, 'org',
+        # Use convert_text to bypass filesystem issues in pypandoc.
+        body_content = pypandoc.convert_text(
+            docx_content, 'org', format='docx',
             extra_args=body_extra_args
         ).strip()
     finally:
         os.remove(body_template_path)
-    # --- End of body extraction ---
 
     # Determine the main heading for the subtree.
     main_heading_title = doc_title if doc_title else fallback_title
@@ -107,29 +112,30 @@ def get_existing_sources(org_file_path):
             found_paths = re.findall(r':SOURCE_FILE:\s+(.*)', content)
             for path in found_paths:
                 # Resolve the path to handle tilde, etc.
-                sources.add(str(Path(path.strip()).resolve()))
+                sources.add(os.path.realpath(os.path.expanduser(path.strip())))
     except IOError as e:
         print(f"Warning: Could not read existing org file: {e}")
     return sources
 
 def import_documents(args):
     """Main function to handle the import logic."""
-    output_path = Path(args.output).expanduser().resolve()
+    output_path = os.path.realpath(os.path.expanduser(args.output))
     existing_sources = get_existing_sources(output_path)
     files_to_import = []
 
     if args.folder:
-        folder_path = Path(args.folder).expanduser().resolve()
-        if not folder_path.is_dir():
+        folder_path = os.path.realpath(os.path.expanduser(args.folder))
+        if not os.path.isdir(folder_path):
             print(f"Error: Folder not found at '{args.folder}'")
             return
         print(f"Importing from {folder_path}...")
-        for docx_file in sorted(folder_path.glob('*.docx')):
-            if str(docx_file.resolve()) not in existing_sources:
+        all_files = sorted([os.path.join(folder_path, f) for f in os.listdir(folder_path) if f.lower().endswith('.docx')])
+        for docx_file in all_files:
+            if os.path.realpath(docx_file) not in existing_sources:
                 files_to_import.append(docx_file)
     elif args.file:
-        file_path = Path(args.file).expanduser().resolve()
-        if not file_path.is_file():
+        file_path = os.path.realpath(os.path.expanduser(args.file))
+        if not os.path.isfile(file_path):
             print(f"Error: File not found at '{args.file}'")
             return
         files_to_import.append(file_path)
@@ -141,10 +147,10 @@ def import_documents(args):
 
     mode = 'a' if args.folder else 'w'
     with open(output_path, mode, encoding='utf-8') as f:
-        if mode == 'a' and f.tell() > 0:
+        if mode == 'a' and os.path.getsize(output_path) > 0:
             f.write("\n")
         for doc_path in files_to_import:
-            print(f"  - Converting {doc_path.name}")
+            print(f"  - Converting {os.path.basename(doc_path)}")
             org_content = convert_docx_to_org(doc_path)
             f.write(org_content + "\n")
 
@@ -185,7 +191,8 @@ def export_document(content, target_file, reference_doc):
 
     extra_args = ["--wrap=none"]
     if reference_doc:
-        extra_args.extend(["--reference-doc", str(Path(reference_doc).expanduser().resolve())])
+        ref_doc_path = os.path.realpath(os.path.expanduser(reference_doc))
+        extra_args.extend(["--reference-doc", ref_doc_path])
 
     if 'title' in metadata:
         extra_args.extend(["-M", f"title={metadata['title']}"])
@@ -193,36 +200,34 @@ def export_document(content, target_file, reference_doc):
         extra_args.extend(["-M", f"subtitle={metadata['subtitle']}"])
 
     extra_args.append("--shift-heading-level-by=-1")
-
+    
+    output_path = os.path.realpath(os.path.expanduser(target_file))
     pypandoc.convert_text(
         cleaned_content,
         'docx',
         format='org',
-        outputfile=str(Path(target_file).expanduser().resolve()),
+        outputfile=output_path,
         extra_args=extra_args
     )
 
 def split_org_file(source_file, output_folder, reference_doc):
     """Splits an org file into multiple docx files, one per top-level heading."""
-    source_path = Path(source_file).expanduser().resolve()
-    output_path = Path(output_folder).expanduser().resolve()
+    source_path = os.path.realpath(os.path.expanduser(source_file))
+    output_path = os.path.realpath(os.path.expanduser(output_folder))
 
-    if not source_path.is_file():
+    if not os.path.isfile(source_path):
         print(f"Error: Source file not found at '{source_file}'")
         return
-
-    output_path.mkdir(parents=True, exist_ok=True)
-    print(f"Splitting '{source_path.name}' into folder '{output_path}'...")
+    
+    if not os.path.exists(output_path):
+        os.makedirs(output_path)
+        
+    print(f"Splitting '{os.path.basename(source_path)}' into folder '{output_path}'...")
 
     with open(source_path, 'r', encoding='utf-8') as f:
         content = f.read()
 
-    # This regex splits the text by '* ' that appears at the beginning of a line.
-    # The `(?m)` flag enables multiline mode. The `(?=...)` is a positive lookahead
-    # to keep the delimiter (`* Heading`) as part of the next chunk.
     subtrees = re.split(r'(?m)^(?=\* .*\n)', content)
-    
-    # Filter out any content before the first heading, or empty strings.
     subtrees = [s for s in subtrees if s.strip() and s.startswith('* ')]
     
     if not subtrees:
@@ -233,7 +238,6 @@ def split_org_file(source_file, output_folder, reference_doc):
     for subtree in subtrees:
         heading_line = subtree.split('\n', 1)[0]
         
-        # Determine filename from EXPORT_TITLE or the heading text itself.
         export_title_match = re.search(r':EXPORT_TITLE:\s*(.*)', subtree, re.IGNORECASE)
         
         if export_title_match:
@@ -241,11 +245,10 @@ def split_org_file(source_file, output_folder, reference_doc):
         else:
             base_name = heading_line.strip('* ').strip()
         
-        # Sanitize the filename to remove characters invalid for file systems.
         sanitized_name = re.sub(r'[\\/*?:"<>|]', "", base_name)
-        target_file = output_path / f"{sanitized_name}.docx"
+        target_file = os.path.join(output_path, f"{sanitized_name}.docx")
         
-        print(f"  - Exporting '{base_name}' to '{target_file.name}'")
+        print(f"  - Exporting '{base_name}' to '{os.path.basename(target_file)}'")
         
         export_document(subtree, target_file, reference_doc)
         count += 1
